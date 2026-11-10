@@ -434,6 +434,64 @@ func TestOutboxStats(t *testing.T) {
 	}
 }
 
+func TestRequeueStale(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := t.Context()
+	usdEUR := quotes.Pair{Base: "USD", Quote: "EUR"}
+
+	// Lost: the worker took it and crashed, and Kafka lost the message.
+	res, _ := s.RequestUpdate(ctx, request(eurMXN, ""))
+	lost := res.Update.ID
+	if _, err := s.StartAttempt(ctx, lost); err != nil {
+		t.Fatal(err)
+	}
+	// Finished long ago: nothing to requeue.
+	res, _ = s.RequestUpdate(ctx, request(usdEUR, ""))
+	done := res.Update.ID
+	_, _ = s.StartAttempt(ctx, done)
+	if err := s.Complete(ctx, done, rates.Rate{Price: "0.92", Date: time.Now()}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh: the worker may still be on it.
+	_, _ = s.RequestUpdate(ctx, request(usdMXN, ""))
+
+	// The relay published everything, and two of the updates are old.
+	if _, err := pool.Exec(ctx, "DELETE FROM outbox"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE quote_updates SET created_at = now() - interval '10 minutes' WHERE id IN ($1, $2)", lost, done); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().Add(-time.Minute)
+
+	n, err := s.RequeueStale(ctx, cutoff)
+	if err != nil || n != 1 {
+		t.Fatalf("RequeueStale() = %d, %v; want 1: only the lost update", n, err)
+	}
+	var payload []byte
+	if err := pool.QueryRow(ctx, "SELECT payload FROM outbox").Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := events.DecodeUpdateRequested(payload)
+	if err != nil || ev.UpdateID != lost || ev.Pair != "EUR/MXN" {
+		t.Errorf("requeued message = %+v, %v; want update %s", ev, err, lost)
+	}
+
+	// While the new message waits in the outbox, nothing is added.
+	if n, err := s.RequeueStale(ctx, cutoff); err != nil || n != 0 {
+		t.Errorf("second RequeueStale() = %d, %v; want 0", n, err)
+	}
+
+	// Once it finishes, the pair takes new requests again.
+	if err := s.Complete(ctx, lost, rates.Rate{Price: "21.4", Date: time.Now()}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	res, _ = s.RequestUpdate(ctx, request(eurMXN, ""))
+	if res.Joined || res.Update.ID == lost {
+		t.Error("a new request for the pair must create a new update")
+	}
+}
+
 func TestDeleteIdempotencyKeys(t *testing.T) {
 	s, _ := newStore(t)
 	ctx := t.Context()

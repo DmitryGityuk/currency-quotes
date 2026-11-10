@@ -24,6 +24,7 @@ import (
 //   - the outbox relay publishes accepted requests to Kafka;
 //   - the consumer fetches the rate for each request and stores it;
 //   - a janitor deletes expired idempotency keys;
+//   - a requeuer sends again the updates whose Kafka message was lost;
 //   - a sampler records the outbox backlog for metrics;
 //   - an HTTP server answers the health probes and serves /metrics.
 //
@@ -71,6 +72,7 @@ func runWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 	g.Go(func() error { return relay.Run(ctx) })
 	g.Go(func() error { return consumer.Run(ctx) })
 	g.Go(func() error { return deleteExpiredKeys(ctx, store, cfg.IdempotencyKeyTTL, logger) })
+	g.Go(func() error { return requeueStale(ctx, store, cfg.RequeueAfter, m, logger) })
 	g.Go(func() error { return sampleOutbox(ctx, store, m, logger) })
 	g.Go(func() error {
 		return listenAndServe(ctx, cfg, logger, httpapi.Chain(mux, httpapi.Recover(logger), httpapi.Metrics(m)))
@@ -103,6 +105,31 @@ func deleteExpiredKeys(ctx context.Context, store *postgres.Store, ttl time.Dura
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+		}
+	}
+}
+
+// requeueStale sends again the updates that have stayed unfinished for longer
+// than after and have no message in the outbox; see Store.RequeueStale. The
+// first check runs only after one interval: right after a restart the
+// consumer first works through the messages that waited in Kafka.
+func requeueStale(ctx context.Context, store *postgres.Store, after time.Duration, m *metrics.Metrics, logger *slog.Logger) error {
+	ticker := time.NewTicker(after / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+		n, err := store.RequeueStale(ctx, time.Now().Add(-after))
+		switch {
+		case err != nil && ctx.Err() == nil:
+			logger.WarnContext(ctx, "requeue stale updates", slog.Any("error", err))
+		case n > 0:
+			m.UpdatesRequeued(n)
+			logger.WarnContext(ctx, "requeued updates whose message was lost",
+				slog.Int("count", n), slog.Duration("unfinished_for_more_than", after))
 		}
 	}
 }

@@ -35,8 +35,9 @@ services:
       POSTGRES_USER: quotes
       POSTGRES_PASSWORD: quotes
     ports:
-      # Not 5432 on the host: a local PostgreSQL often already uses it.
-      - "${POSTGRES_PORT:-55432}:5432"
+      # Only on localhost: the password is a well-known default. Not 5432 on
+      # the host: a local PostgreSQL often already uses it.
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -84,7 +85,7 @@ services:
       # Keeps the stack small enough for Docker Desktop's default memory.
       KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
     ports:
-      - "${KAFKA_PORT:-59094}:9094"
+      - "127.0.0.1:${KAFKA_PORT:-59094}:9094"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
@@ -170,13 +171,14 @@ services:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
     image: grafana/grafana:13.1.0
     profiles: [observability]
     environment:
-      # A local demo: open without logging in.
+      # A local demo: open without logging in; the port is published on
+      # localhost only, so nobody else on the network gets in.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/currency-quotes.json
@@ -187,7 +189,7 @@ services:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     depends_on:
       - prometheus
 
@@ -198,7 +200,7 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
     ports:
-      - "${KAFKA_UI_PORT:-8090}:8080"
+      - "127.0.0.1:${KAFKA_UI_PORT:-8090}:8080"
     depends_on:
       kafka:
         condition: service_healthy

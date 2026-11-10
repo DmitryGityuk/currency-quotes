@@ -46,3 +46,13 @@ groups:
           severity: warning
         annotations:
           summary: "Messages were sent to quote.update.requested.dlq; inspect them in Kafka UI"
+
+      # An update lost its Kafka message and the worker sent it again. It
+      # heals itself, but messages should not get lost: check Kafka's
+      # storage and retention.
+      - alert: UpdatesRequeued
+        expr: increase(quotes_updates_requeued_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Updates lost their Kafka message and were sent again; check Kafka storage and retention"

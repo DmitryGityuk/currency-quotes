@@ -49,6 +49,7 @@ func TestLoadOverrides(t *testing.T) {
 		"RELAY_INTERVAL":          "50ms",
 		"RELAY_BATCH_SIZE":        "10",
 		"IDEMPOTENCY_KEY_TTL":     "1h",
+		"REQUEUE_AFTER":           "30s",
 	}))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -74,6 +75,7 @@ func TestLoadOverrides(t *testing.T) {
 		RelayInterval:     50 * time.Millisecond,
 		RelayBatchSize:    10,
 		IdempotencyKeyTTL: time.Hour,
+		RequeueAfter:      30 * time.Second,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load() = %+v\nwant     %+v", cfg, want)
@@ -113,6 +115,7 @@ func TestLoadErrors(t *testing.T) {
 			wantErr: []string{"RETRY_BASE_DELAY", "RETRY_MAX_DELAY"},
 		},
 		{name: "zero batch", vars: map[string]string{"RELAY_BATCH_SIZE": "0"}, wantErr: []string{"RELAY_BATCH_SIZE"}},
+		{name: "negative requeue", vars: map[string]string{"REQUEUE_AFTER": "-1m"}, wantErr: []string{"REQUEUE_AFTER"}},
 		{
 			name:    "all errors are reported together",
 			vars:    map[string]string{"SHUTDOWN_TIMEOUT": "soon", "LOG_FORMAT": "xml", "MAX_ATTEMPTS": "0"},

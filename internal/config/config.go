@@ -78,6 +78,9 @@ type Config struct {
 	RelayBatchSize int
 	// IdempotencyKeyTTL is how long Idempotency-Key values are kept (IDEMPOTENCY_KEY_TTL).
 	IdempotencyKeyTTL time.Duration
+	// RequeueAfter is how long an update may stay unfinished without a
+	// message in the outbox before the worker sends it again (REQUEUE_AFTER).
+	RequeueAfter time.Duration
 }
 
 // localDatabaseURL points at the PostgreSQL that `make infra` starts.
@@ -108,6 +111,9 @@ func Default() Config {
 		RelayInterval:     200 * time.Millisecond,
 		RelayBatchSize:    100,
 		IdempotencyKeyTTL: 24 * time.Hour,
+		// Well above the longest normal processing: 3 attempts of up to 5s
+		// each plus up to 5s between them.
+		RequeueAfter: 2 * time.Minute,
 	}
 }
 
@@ -213,6 +219,7 @@ func Load(getenv func(string) string) (Config, error) {
 	l.duration("RELAY_INTERVAL", &cfg.RelayInterval)
 	l.positiveInt("RELAY_BATCH_SIZE", &cfg.RelayBatchSize)
 	l.duration("IDEMPOTENCY_KEY_TTL", &cfg.IdempotencyKeyTTL)
+	l.duration("REQUEUE_AFTER", &cfg.RequeueAfter)
 
 	if err := errors.Join(l.errs...); err != nil {
 		return Config{}, err

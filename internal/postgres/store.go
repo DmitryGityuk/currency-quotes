@@ -354,6 +354,55 @@ func (s *Store) OutboxStats(ctx context.Context) (int, time.Duration, error) {
 	return n, time.Duration(oldest * float64(time.Second)), nil
 }
 
+// requeueBatch caps how many updates one RequeueStale call sends again.
+const requeueBatch = 100
+
+// RequeueStale writes a new outbox message for unfinished updates requested
+// before cutoff that have no message waiting in the outbox, and returns how
+// many it requeued.
+//
+// Such an update has lost its message after the relay deleted it from the
+// outbox: Kafka lost its data, or retention expired while the workers were
+// down. Without a new message the update would stay unfinished forever, and
+// the partial unique index would join every later request for the pair to
+// it, so the pair could never be updated again. If the original message was
+// only late, the copy is harmless: the worker skips finished updates.
+func (s *Store) RequeueStale(ctx context.Context, cutoff time.Time) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// SKIP LOCKED: several workers can run this at once without waiting for
+	// each other or requeueing the same update twice.
+	rows, err := tx.Query(ctx, `
+		SELECT `+updateColumns+` FROM quote_updates u
+		WHERE status IN ('pending', 'processing') AND created_at < $1
+		  AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.payload->>'update_id' = u.id::text)
+		ORDER BY created_at
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED`, cutoff, requeueBatch)
+	if err != nil {
+		return 0, fmt.Errorf("find stale updates: %w", err)
+	}
+	stale, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (quotes.Update, error) {
+		return scanUpdate(row)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("read stale updates: %w", err)
+	}
+	for _, upd := range stale {
+		if err := insertOutbox(ctx, tx, upd, ""); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return len(stale), nil
+}
+
 // DeleteIdempotencyKeys removes keys created before cutoff.
 func (s *Store) DeleteIdempotencyKeys(ctx context.Context, cutoff time.Time) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM idempotency_keys WHERE created_at < $1`, cutoff)

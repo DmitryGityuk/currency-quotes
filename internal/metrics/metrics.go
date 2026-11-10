@@ -31,6 +31,7 @@ type Metrics struct {
 	updatesFinished *prometheus.CounterVec
 	updateDuration  *prometheus.HistogramVec
 	updateAttempts  prometheus.Histogram
+	updatesRequeued prometheus.Counter
 
 	providerCalls    *prometheus.CounterVec
 	providerDuration prometheus.Histogram
@@ -77,6 +78,10 @@ func New() *Metrics {
 			Help:    "Provider calls an update needed before its final status.",
 			Buckets: []float64{1, 2, 3, 4, 5},
 		}),
+		updatesRequeued: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Name: "updates_requeued_total",
+			Help: "Unfinished updates sent to Kafka again because their message was lost.",
+		}),
 
 		providerCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "provider_requests_total",
@@ -115,7 +120,7 @@ func New() *Metrics {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.httpRequests, m.httpDuration,
-		m.updateRequests, m.updatesFinished, m.updateDuration, m.updateAttempts,
+		m.updateRequests, m.updatesFinished, m.updateDuration, m.updateAttempts, m.updatesRequeued,
 		m.providerCalls, m.providerDuration,
 		m.outboxPublished, m.outboxFailures, m.outboxBacklog, m.outboxOldest,
 		m.kafkaMessages,
@@ -151,6 +156,9 @@ func (m *Metrics) UpdateFinished(pair quotes.Pair, status quotes.Status, attempt
 	m.updateDuration.WithLabelValues(string(status)).Observe(sinceRequested.Seconds())
 	m.updateAttempts.Observe(float64(attempts))
 }
+
+// UpdatesRequeued counts updates sent to Kafka again.
+func (m *Metrics) UpdatesRequeued(n int) { m.updatesRequeued.Add(float64(n)) }
 
 // Published implements outbox.Observer.
 func (m *Metrics) Published(n int) { m.outboxPublished.Add(float64(n)) }
