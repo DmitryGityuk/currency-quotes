@@ -1,0 +1,92 @@
+# Public demo on a small VPS, on top of compose.yaml:
+#
+#   cp deploy/server.env.example .env   # then set DOMAIN and POSTGRES_PASSWORD
+#   docker compose up --build --detach --wait
+#
+# COMPOSE_FILE in .env makes docker compose read both files, so ps, logs and
+# down work without -f flags.
+#
+# Differences from the local stack:
+#   - only Caddy is published (80 and 443, HTTPS from Let's Encrypt); the API,
+#     PostgreSQL and Kafka are reachable only inside the Docker network;
+#   - the database password comes from .env;
+#   - every container has a memory limit, so the demo cannot starve other
+#     services on the same server; Kafka gets a smaller heap;
+#   - container logs are rotated.
+# The observability profile is not meant for the server: it needs another
+# 0.5-0.8 GB of memory.
+
+x-database-url: &database-url postgres://quotes:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/quotes?sslmode=disable
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports: !reset []
+    restart: unless-stopped
+    mem_limit: 256m
+    logging: *logging
+
+  migrate:
+    environment:
+      DATABASE_URL: *database-url
+    logging: *logging
+
+  kafka:
+    environment:
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx256m"
+    ports: !reset []
+    restart: unless-stopped
+    mem_limit: 640m
+    logging: *logging
+
+  kafka-init:
+    logging: *logging
+
+  api:
+    environment:
+      DATABASE_URL: *database-url
+    ports: !reset []
+    mem_limit: 128m
+    logging: *logging
+
+  worker:
+    environment:
+      DATABASE_URL: *database-url
+    mem_limit: 128m
+    logging: *logging
+
+  demo:
+    logging: *logging
+
+  # HTTPS entry point: gets and renews the certificate for DOMAIN by itself
+  # and proxies to the API. See deploy/caddy/Caddyfile.
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates: keep them across restarts, Let's Encrypt limits reissues.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    logging: *logging
+
+volumes:
+  caddy-data:
+  caddy-config:
