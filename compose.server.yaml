@@ -85,7 +85,10 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_SERVER_ROOT_URL: https://grafana.${DOMAIN:?set DOMAIN in .env}
-    mem_limit: 320m
+      # Grafana is a Go program: a soft limit below the hard one makes its
+      # garbage collector work harder before the container is killed.
+      GOMEMLIMIT: 350MiB
+    mem_limit: 448m
     logging: *logging
 
   kafka-ui:
