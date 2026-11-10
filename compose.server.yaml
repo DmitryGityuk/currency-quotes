@@ -13,8 +13,10 @@
 #   - every container has a memory limit, so the demo cannot starve other
 #     services on the same server; Kafka gets a smaller heap;
 #   - container logs are rotated.
-# The observability profile is not meant for the server: it needs another
-# 0.5-0.8 GB of memory.
+#   - Prometheus and Grafana always run; Grafana is public at grafana.DOMAIN,
+#     read-only, and Prometheus stays inside the network. Kafka UI stays in
+#     the observability profile: start it for a while and reach it through
+#     an SSH tunnel (it listens on 127.0.0.1:8090 of the server).
 
 x-database-url: &database-url postgres://quotes:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/quotes?sslmode=disable
 
@@ -63,6 +65,31 @@ services:
     logging: *logging
 
   demo:
+    logging: *logging
+
+  prometheus:
+    profiles: !reset []
+    ports: !reset []
+    restart: unless-stopped
+    mem_limit: 256m
+    logging: *logging
+
+  grafana:
+    profiles: !reset []
+    ports: !reset []
+    restart: unless-stopped
+    environment:
+      # Public: visitors may look, not edit. The default admin/admin must not
+      # work either, and nobody needs to log in.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SERVER_ROOT_URL: https://grafana.${DOMAIN:?set DOMAIN in .env}
+    mem_limit: 320m
+    logging: *logging
+
+  kafka-ui:
+    mem_limit: 512m
     logging: *logging
 
   # HTTPS entry point: gets and renews the certificate for DOMAIN by itself

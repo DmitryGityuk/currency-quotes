@@ -203,8 +203,10 @@ jobs:
       RATES_PROVIDER: fake
     steps:
       - uses: actions/checkout@v5
-      - name: Generate the database password
-        run: echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+      - name: Generate passwords
+        run: |
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
       - name: Start the stack
         run: docker compose up --build --detach --wait --wait-timeout 180
       - name: The API answers through Caddy, internal endpoints do not
@@ -215,9 +217,24 @@ jobs:
           curl --fail -sk https://localhost/readyz
           test "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/metrics)" = 404
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost/docs)" = 308
+      - name: Grafana is public, read-only and without the default password
+        run: |
+          grafana() { curl -sk --resolve grafana.localhost:443:127.0.0.1 "$@"; }
+          for i in $(seq 60); do grafana --fail --output /dev/null https://grafana.localhost/api/health && break; sleep 1; done
+          grafana --fail https://grafana.localhost/api/search | jq -e 'length > 0'
+          code() { grafana -o /dev/null -w '%{http_code}' "$@"; }
+          # The admin API opens with the password from .env and not with the default one.
+          real=$(code -u "admin:$GRAFANA_ADMIN_PASSWORD" https://grafana.localhost/api/admin/settings)
+          default=$(code -u admin:admin https://grafana.localhost/api/admin/settings)
+          # A visitor cannot change anything.
+          write=$(code -X POST -H 'Content-Type: application/json' -d '{"title":"x"}' https://grafana.localhost/api/folders)
+          echo "admin with the real password: $real, with admin/admin: $default, anonymous write: $write"
+          test "$real" = 200
+          case "$default" in 401|403) ;; *) exit 1 ;; esac
+          case "$write" in 401|403) ;; *) exit 1 ;; esac
       - name: Only Caddy is published
         run: |
-          for port in 8080 55432 59094; do
+          for port in 8080 55432 59094 9090 3000; do
             if timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then
               echo "port $port is published, but it must stay inside the Docker network"; exit 1
             fi
