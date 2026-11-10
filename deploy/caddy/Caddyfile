@@ -13,3 +13,10 @@
 
 	log
 }
+
+# The Grafana dashboard, read-only (see compose.server.yaml).
+grafana.{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy grafana:3000
+	log
+}
