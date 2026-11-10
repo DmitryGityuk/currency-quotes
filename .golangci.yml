@@ -1,0 +1,42 @@
+# golangci-lint v2 configuration.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - bodyclose      # HTTP response bodies are closed
+    - contextcheck   # contexts are passed down, not replaced
+    - errorlint      # errors are compared with errors.Is / errors.As
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx          # HTTP requests carry a context
+    - revive
+    - rowserrcheck   # rows.Err() is checked
+    - sqlclosecheck  # rows and statements are closed
+    - unconvert
+    - unparam
+    - usestdlibvars
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Tests use throwaway credentials and read the migration files.
+      - path: _test\.go
+        linters: [gosec]
+        text: "G101|G304"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/DmitryGityuk/currency-quotes

@@ -1,0 +1,29 @@
+@startuml state-update
+' Statuses of a row in quote_updates.
+title Жизненный цикл обновления котировки
+hide empty description
+
+state pending
+state processing
+state done #D5F5E3
+state failed #FADBD8
+
+[*] --> pending : POST /api/v1/quotes/updates\nзаявка и outbox в одной транзакции
+pending --> processing : воркер получил сообщение\nattempts + 1
+processing --> processing : повторная доставка\nпосле сбоя воркера
+processing --> done : курс получен,\nцена и время записаны
+processing --> failed : попытки исчерпаны\nили ответ 4xx
+done --> [*]
+failed --> [*]
+
+note right of pending
+  Пока обновление в pending или processing,
+  POST по той же паре возвращает его id:
+  это гарантирует частичный уникальный индекс
+end note
+
+note right of done
+  done и failed — конечные статусы:
+  повторные сообщения их не меняют
+end note
+@enduml

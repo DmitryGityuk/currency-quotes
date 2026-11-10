@@ -1,0 +1,65 @@
+@startuml er
+' Database schema, see migrations/000001_init.up.sql.
+title Схема базы данных
+hide circle
+hide empty members
+
+entity "quote_updates" as quote_updates {
+  * id : uuid <<PK>>
+  --
+  * base_currency : text
+  * quote_currency : text
+  * status : text
+  * attempts : integer
+  price : numeric
+  rate_date : date
+  last_error : text
+  * created_at : timestamptz
+  completed_at : timestamptz
+}
+
+entity "quotes" as quotes {
+  * base_currency : text <<PK>>
+  * quote_currency : text <<PK>>
+  --
+  * price : numeric
+  * rate_date : date
+  * updated_at : timestamptz
+  * update_id : uuid <<FK>>
+}
+
+entity "idempotency_keys" as idempotency_keys {
+  * idempotency_key : text <<PK>>
+  --
+  * request_hash : bytea
+  * update_id : uuid <<FK>>
+  * created_at : timestamptz
+}
+
+entity "outbox" as outbox {
+  * id : bigint <<PK>>
+  --
+  * topic : text
+  * message_key : text
+  * payload : jsonb
+  * headers : jsonb
+  * created_at : timestamptz
+}
+
+quote_updates ||--o| quotes : "последнее обновление пары"
+quote_updates ||--o{ idempotency_keys : "ON DELETE CASCADE"
+quote_updates ||..o{ outbox : "payload.update_id, без FK"
+
+note bottom of quote_updates
+  status: pending, processing, done, failed
+  UNIQUE (base_currency, quote_currency)
+  WHERE status IN ('pending', 'processing'):
+  не больше одного незавершённого
+  обновления на пару
+end note
+
+note bottom of outbox
+  Строка удаляется, как только
+  Kafka подтвердила запись
+end note
+@enduml

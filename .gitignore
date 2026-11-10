@@ -1,0 +1,18 @@
+# Build output
+/bin/
+/dist/
+
+# Test and coverage output
+*.out
+*.test
+coverage.*
+
+# Local settings
+.env
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

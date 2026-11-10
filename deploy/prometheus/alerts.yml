@@ -1,0 +1,48 @@
+# Alerts on symptoms a client would notice, not on every internal error.
+# Without Alertmanager they show up at http://localhost:9090/alerts.
+groups:
+  - name: currency-quotes
+    rules:
+      - alert: InstanceDown
+        expr: up{job=~"api|worker"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} does not answer /metrics"
+
+      # POST still answers 202 while Kafka is down, so the outbox is the
+      # place where the outage becomes visible.
+      - alert: OutboxBacklogGrowing
+        expr: quotes_outbox_oldest_message_age_seconds > 60
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox messages wait for {{ $value | humanizeDuration }}: Kafka or the relay is down"
+
+      - alert: UpdatesFailing
+        expr: |
+          sum(rate(quotes_updates_finished_total{status="failed"}[5m]))
+            / sum(rate(quotes_updates_finished_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of quote updates fail"
+
+      - alert: UpdatesSlow
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(quotes_update_duration_seconds_bucket{status="done"}[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95% of updates take up to {{ $value | humanizeDuration }}"
+
+      - alert: MessagesInDLQ
+        expr: increase(quotes_kafka_messages_total{outcome="dlq"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Messages were sent to quote.update.requested.dlq; inspect them in Kafka UI"

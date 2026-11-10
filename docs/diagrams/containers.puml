@@ -1,0 +1,37 @@
+@startuml containers
+' C4 container diagram: what runs in docker compose and who talks to whom.
+!include <C4/C4_Container>
+
+title Currency Quotes: контейнеры
+
+Person(client, "Клиент", "curl, Swagger UI или другой сервис")
+
+System_Boundary(service, "Currency Quotes") {
+    Container(api, "API", "Go, net/http", "Регистрирует заявки на обновление и отдаёт котировки. Не обращается ни к Kafka, ни к внешнему API")
+    Container(worker, "Worker", "Go", "Outbox relay, Kafka consumer, клиент источника курсов, очистка старых ключей идемпотентности")
+    ContainerDb(db, "PostgreSQL", "17", "quote_updates, quotes, outbox, idempotency_keys")
+    ContainerQueue(kafka, "Kafka", "4.2, KRaft", "quote.update.requested: 6 партиций, ключ сообщения — пара; quote.update.requested.dlq")
+    Container(migrate, "migrate", "golang-migrate", "Применяет миграции до старта API и воркера")
+}
+
+System_Ext(rates, "Frankfurter API", "Курсы центробанков, публикуются раз в рабочий день")
+
+System_Boundary(observability, "Наблюдаемость: профиль observability") {
+    Container(prometheus, "Prometheus", "3.15", "Собирает /metrics каждые 5 с, правила алертов")
+    Container(grafana, "Grafana", "13.1", "Готовый дашборд Currency Quotes")
+    Container(kafkaui, "Kafka UI", "kafbat", "Топики, сообщения, DLQ, consumer group")
+}
+
+Rel(client, api, "POST и GET котировок", "HTTP/JSON")
+Rel(api, db, "Заявка и outbox в одной транзакции; чтение результатов", "SQL")
+Rel(worker, db, "Читает outbox, записывает результат", "SQL")
+Rel(worker, kafka, "Публикует заявки и читает их", "Kafka")
+Rel(worker, rates, "Запрашивает курс", "HTTPS")
+Rel(migrate, db, "Создаёт схему", "SQL")
+Rel(prometheus, api, "Метрики", "HTTP /metrics")
+Rel(prometheus, worker, "Метрики", "HTTP /metrics")
+Rel(grafana, prometheus, "Запросы", "PromQL")
+Rel(kafkaui, kafka, "Читает топики", "Kafka")
+
+SHOW_LEGEND()
+@enduml

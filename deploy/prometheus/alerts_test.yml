@@ -1,0 +1,71 @@
+# Unit tests for alerts.yml: promtool test rules deploy/prometheus/alerts_test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: outbox backlog
+    interval: 15s
+    input_series:
+      - series: quotes_outbox_oldest_message_age_seconds{job="worker"}
+        values: "0 0 30 60 75 90 105 120 135 150"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: OutboxBacklogGrowing
+        exp_alerts: []
+      - eval_time: 135s
+        alertname: OutboxBacklogGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: worker
+            exp_annotations:
+              summary: "Outbox messages wait for 2m 30s: Kafka or the relay is down"
+
+  - name: failing updates
+    interval: 1m
+    input_series:
+      - series: quotes_updates_finished_total{pair="EUR/MXN",status="done"}
+        values: "0+10x15"
+      - series: quotes_updates_finished_total{pair="EUR/MXN",status="failed"}
+        values: "0+5x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: UpdatesFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "33.33% of quote updates fail"
+
+  - name: instance down
+    interval: 15s
+    input_series:
+      - series: up{job="worker", instance="worker:8080"}
+        values: "1 1 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 75s
+        alertname: InstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: worker
+              instance: worker:8080
+            exp_annotations:
+              summary: "worker does not answer /metrics"
+
+  - name: dlq
+    interval: 1m
+    input_series:
+      - series: quotes_kafka_messages_total{outcome="dlq"}
+        values: "0 0 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MessagesInDLQ
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: dlq
+            exp_annotations:
+              summary: "Messages were sent to quote.update.requested.dlq; inspect them in Kafka UI"

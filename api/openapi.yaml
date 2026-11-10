@@ -1,0 +1,576 @@
+openapi: 3.1.0
+
+info:
+  title: Currency Quotes API
+  version: 1.0.0
+  summary: Котировки валютных курсов с асинхронным обновлением
+  description: |
+    Как пользоваться:
+
+    1. `POST /api/v1/quotes/updates` с парой, например `EUR/MXN`. Сервис регистрирует
+       заявку и сразу возвращает идентификатор обновления.
+    2. Курс запрашивается у внешнего источника в фоне, в отдельном процессе-воркере.
+    3. `GET /api/v1/quotes/updates/{id}` возвращает результат этого обновления: цену и время.
+    4. `GET /api/v1/quotes/latest?pair=EUR/MXN` возвращает последнюю полученную котировку пары.
+
+    Поддерживаются валюты USD, EUR и MXN, то есть шесть пар.
+
+    Цены передаются строками (`"21.4512"`): при разборе JSON-числа во float
+    теряется точность, а для денег это недопустимо.
+
+    Ошибки возвращаются в формате [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457),
+    `Content-Type: application/problem+json`.
+
+servers:
+  - url: /
+    description: Тот же адрес, с которого открыта спецификация
+
+# The service has no authentication; the empty list says so explicitly.
+security: []
+
+tags:
+  - name: quotes
+    description: Котировки и их обновление
+  - name: health
+    description: Пробы для Docker и Kubernetes и метрики Prometheus
+
+paths:
+  /api/v1/quotes/updates:
+    post:
+      tags: [quotes]
+      operationId: createQuoteUpdate
+      summary: Запросить обновление котировки
+      description: |
+        Регистрирует заявку и сразу отвечает `202 Accepted` с идентификатором обновления.
+        Сам курс запрашивается в фоне: обработчик этого запроса не обращается ни к
+        внешнему источнику, ни к Kafka. Результат доступен по адресу из заголовка `Location`.
+
+        **Идемпотентность**
+
+        - Повтор с тем же `Idempotency-Key` и тем же телом возвращает тот же `id`
+          и заголовок `Idempotent-Replayed: true`. Тот же ключ с другим телом даёт `422`.
+        - Пока по паре есть незавершённое обновление (`pending` или `processing`),
+          новый запрос по этой паре возвращает его `id`, а не запускает второе.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteUpdateRequest'
+            examples:
+              eurMxn:
+                summary: Евро в мексиканских песо
+                value:
+                  pair: EUR/MXN
+      responses:
+        '202':
+          description: |
+            Заявка принята. Тот же ответ приходит при повторе по `Idempotency-Key`
+            и когда запрос присоединился к незавершённому обновлению пары.
+          headers:
+            Location:
+              description: Адрес результата обновления.
+              schema:
+                type: string
+                format: uri-reference
+              example: /api/v1/quotes/updates/01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+            Idempotent-Replayed:
+              description: '`true`, если это повтор ответа по `Idempotency-Key`.'
+              schema:
+                type: boolean
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteUpdate'
+              examples:
+                accepted:
+                  summary: Новое обновление
+                  value:
+                    id: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+                    pair: EUR/MXN
+                    status: pending
+                    requested_at: '2026-11-06T10:15:00.123Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/quotes/updates/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Идентификатор из ответа на `POST /api/v1/quotes/updates`.
+        schema:
+          type: string
+          format: uuid
+        example: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+    get:
+      tags: [quotes]
+      operationId: getQuoteUpdate
+      summary: Получить результат обновления
+      description: |
+        Возвращает состояние обновления. В статусе `done` в ответе есть цена (`price`)
+        и время обновления (`updated_at`) именно этого обновления: последующие
+        обновления пары его не меняют.
+
+        Пока обновление не завершено, цены в ответе нет, а заголовок `Retry-After`
+        подсказывает, через сколько секунд спросить снова.
+      responses:
+        '200':
+          description: Состояние обновления.
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteUpdate'
+              examples:
+                pending:
+                  summary: Ждёт воркера
+                  value:
+                    id: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+                    pair: EUR/MXN
+                    status: pending
+                    requested_at: '2026-11-06T10:15:00.123Z'
+                processing:
+                  summary: Воркер запрашивает курс
+                  value:
+                    id: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+                    pair: EUR/MXN
+                    status: processing
+                    requested_at: '2026-11-06T10:15:00.123Z'
+                done:
+                  summary: Курс получен
+                  value:
+                    id: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+                    pair: EUR/MXN
+                    status: done
+                    requested_at: '2026-11-06T10:15:00.123Z'
+                    price: '21.4512'
+                    rate_date: '2026-11-05'
+                    updated_at: '2026-11-06T10:15:00.734Z'
+                failed:
+                  summary: Источник недоступен
+                  value:
+                    id: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+                    pair: EUR/MXN
+                    status: failed
+                    requested_at: '2026-11-06T10:15:00.123Z'
+                    error: 'rates provider is unavailable: 3 attempts failed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/quotes/latest:
+    get:
+      tags: [quotes]
+      operationId: getLatestQuote
+      summary: Получить последнюю котировку пары
+      description: |
+        Возвращает последнюю успешно полученную котировку пары. Сам курс этот
+        запрос не обновляет: для этого есть `POST /api/v1/quotes/updates`.
+      parameters:
+        - name: pair
+          in: query
+          required: true
+          description: |
+            Валютная пара. Слэш можно не кодировать: `?pair=EUR/MXN`
+            и `?pair=EUR%2FMXN` равнозначны.
+          schema:
+            $ref: '#/components/schemas/Pair'
+          example: EUR/MXN
+      responses:
+        '200':
+          description: Последняя котировка.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quote'
+              examples:
+                eurMxn:
+                  value:
+                    pair: EUR/MXN
+                    price: '21.4512'
+                    rate_date: '2026-11-05'
+                    updated_at: '2026-11-06T10:15:00.734Z'
+                    update_id: 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /livez:
+    get:
+      tags: [health]
+      operationId: getLiveness
+      summary: Процесс жив
+      description: Не проверяет зависимости, поэтому сбой базы не приводит к перезапуску сервиса.
+      responses:
+        '200':
+          description: Процесс отвечает.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                ok:
+                  value:
+                    status: ok
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Готов принимать запросы
+      description: Проверяет зависимости экземпляра, например PostgreSQL.
+      responses:
+        '200':
+          description: Все зависимости доступны.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                ok:
+                  value:
+                    status: ok
+                    checks:
+                      postgres: ok
+        '503':
+          description: Хотя бы одна зависимость недоступна.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                unavailable:
+                  value:
+                    status: unavailable
+                    checks:
+                      postgres: 'dial tcp 172.18.0.2:5432: connect: connection refused'
+
+  /metrics:
+    get:
+      tags: [health]
+      operationId: getMetrics
+      summary: Метрики Prometheus
+      description: |
+        Метрики в текстовом формате Prometheus: HTTP-запросы, заявки на обновление,
+        вызовы источника курсов, очередь outbox, метрики рантайма Go.
+      responses:
+        '200':
+          description: Метрики.
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                sample:
+                  value: |
+                    # HELP quotes_update_requests_total Accepted update requests by pair and outcome: created, joined or replayed.
+                    # TYPE quotes_update_requests_total counter
+                    quotes_update_requests_total{outcome="created",pair="EUR/MXN"} 1
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Ключ идемпотентности по
+        [draft-ietf-httpapi-idempotency-key-header](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/).
+        Подойдёт любой уникальный для запроса ASCII-текст, например UUID. Ключ хранится 24 часа.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: '^[!-~]+$'
+      example: 5f0c6e9e-2b7a-4c55-9d43-7d3f1a2b8c61
+
+  headers:
+    RetryAfter:
+      description: Через сколько секунд имеет смысл запросить результат. Есть, только пока обновление не завершено.
+      schema:
+        type: integer
+        minimum: 1
+      example: 1
+    RequestID:
+      description: |
+        Идентификатор запроса для поиска в логах. Берётся из заголовка запроса
+        `X-Request-ID`, если он есть, иначе генерируется.
+      schema:
+        type: string
+      example: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+
+  schemas:
+    Pair:
+      type: string
+      description: |
+        Валютная пара в виде `БАЗОВАЯ/КОТИРУЕМАЯ`: цена одной единицы базовой
+        валюты в котируемой. Регистр не важен, в ответах пара всегда в верхнем регистре.
+        Поддерживаются USD, EUR и MXN.
+      pattern: '^[A-Za-z]{3}/[A-Za-z]{3}$'
+      examples:
+        - EUR/MXN
+
+    Decimal:
+      type: string
+      description: Десятичное число строкой, без потери точности.
+      pattern: '^[0-9]+(\.[0-9]+)?$'
+      examples:
+        - '21.4512'
+
+    QuoteUpdateStatus:
+      type: string
+      description: |
+        - `pending`: заявка принята и ждёт воркера;
+        - `processing`: воркер запрашивает курс;
+        - `done`: курс получен, в ответе есть цена;
+        - `failed`: курс получить не удалось, причина в поле `error`.
+      enum: [pending, processing, done, failed]
+
+    QuoteUpdateRequest:
+      type: object
+      required: [pair]
+      additionalProperties: false
+      properties:
+        pair:
+          $ref: '#/components/schemas/Pair'
+
+    QuoteUpdate:
+      type: object
+      required: [id, pair, status, requested_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Идентификатор обновления.
+        pair:
+          $ref: '#/components/schemas/Pair'
+        status:
+          $ref: '#/components/schemas/QuoteUpdateStatus'
+        requested_at:
+          type: string
+          format: date-time
+          description: Когда заявка принята.
+        price:
+          $ref: '#/components/schemas/Decimal'
+          description: Цена. Только в статусе `done`.
+        rate_date:
+          type: string
+          format: date
+          description: |
+            Дата, на которую источник опубликовал курс. Центробанки публикуют курсы
+            раз в рабочий день, поэтому несколько обновлений за день вернут одну цену.
+            Только в статусе `done`.
+        updated_at:
+          type: string
+          format: date-time
+          description: Время обновления котировки, то есть когда сервис получил курс. Только в статусе `done`.
+        error:
+          type: string
+          description: Причина неудачи. Только в статусе `failed`.
+      allOf:
+        - if:
+            properties:
+              status:
+                const: done
+          then:
+            required: [price, rate_date, updated_at]
+        - if:
+            properties:
+              status:
+                const: failed
+          then:
+            required: [error]
+
+    Quote:
+      type: object
+      required: [pair, price, rate_date, updated_at, update_id]
+      properties:
+        pair:
+          $ref: '#/components/schemas/Pair'
+        price:
+          $ref: '#/components/schemas/Decimal'
+        rate_date:
+          type: string
+          format: date
+          description: Дата, на которую источник опубликовал курс.
+        updated_at:
+          type: string
+          format: date-time
+          description: Время обновления котировки, то есть когда сервис получил курс.
+        update_id:
+          type: string
+          format: uuid
+          description: Обновление, которое получило эту цену.
+
+    Problem:
+      type: object
+      description: Описание ошибки по RFC 9457.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+          description: Всегда `about:blank`, суть ошибки передаёт `code`.
+        title:
+          type: string
+          description: Текст HTTP-статуса.
+        status:
+          type: integer
+          description: HTTP-статус.
+        detail:
+          type: string
+          description: Что именно не так, для человека.
+        code:
+          type: string
+          description: |
+            Код ошибки для программы:
+            `invalid_json`, `invalid_pair`, `invalid_id`, `invalid_idempotency_key`,
+            `unsupported_currency`, `same_currency`, `idempotency_key_reused`,
+            `update_not_found`, `quote_not_found`, `internal`.
+        request_id:
+          type: string
+          description: Тот же идентификатор, что в заголовке `X-Request-ID`.
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+        checks:
+          type: object
+          description: Результат каждой проверки — `ok` или текст ошибки.
+          additionalProperties:
+            type: string
+
+  responses:
+    BadRequest:
+      description: Запрос нельзя разобрать.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            invalidPair:
+              value:
+                type: about:blank
+                title: Bad Request
+                status: 400
+                detail: 'pair "EURMXN" must look like EUR/MXN'
+                code: invalid_pair
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+            invalidJSON:
+              value:
+                type: about:blank
+                title: Bad Request
+                status: 400
+                detail: 'request body: unknown field "currency"'
+                code: invalid_json
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+    UnprocessableContent:
+      description: Запрос разобран, но выполнить его нельзя.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            unsupportedCurrency:
+              value:
+                type: about:blank
+                title: Unprocessable Entity
+                status: 422
+                detail: 'currency GBP is not supported; supported: EUR, MXN, USD'
+                code: unsupported_currency
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+            sameCurrency:
+              value:
+                type: about:blank
+                title: Unprocessable Entity
+                status: 422
+                detail: pair EUR/EUR has the same currency on both sides
+                code: same_currency
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+            idempotencyKeyReused:
+              value:
+                type: about:blank
+                title: Unprocessable Entity
+                status: 422
+                detail: Idempotency-Key was already used with a different request body
+                code: idempotency_key_reused
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+    NotFound:
+      description: Обновления или котировки нет.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            updateNotFound:
+              value:
+                type: about:blank
+                title: Not Found
+                status: 404
+                detail: update 01972f4e-8b3a-7c21-9d4e-5f6a7b8c9d0e not found
+                code: update_not_found
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+            quoteNotFound:
+              value:
+                type: about:blank
+                title: Not Found
+                status: 404
+                detail: 'no quote for EUR/MXN yet; request an update with POST /api/v1/quotes/updates'
+                code: quote_not_found
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a
+    InternalError:
+      description: Внутренняя ошибка. Подробности в логах по `request_id`.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            internal:
+              value:
+                type: about:blank
+                title: Internal Server Error
+                status: 500
+                code: internal
+                request_id: 3b1f2c9e-6d4a-4e8b-9a7c-1f2e3d4c5b6a

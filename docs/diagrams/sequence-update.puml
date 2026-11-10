@@ -1,0 +1,69 @@
+@startuml sequence-update
+' The main flow: the request is registered synchronously, the quote is
+' fetched in the background, the client polls for the result.
+title Обновление котировки: заявка, фоновая обработка, результат
+autonumber
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 280
+
+actor "Клиент" as client
+participant "API" as api
+database "PostgreSQL" as db
+box "Worker" #EEF3F8
+    participant "Outbox relay" as relay
+    participant "Consumer" as consumer
+end box
+queue "Kafka" as kafka
+participant "Frankfurter" as rates
+
+== 1. Заявка: синхронно, за миллисекунды ==
+
+client -> api : POST /api/v1/quotes/updates\n{"pair": "EUR/MXN"}
+activate api
+api -> api : проверить пару
+api -> db : BEGIN\nINSERT quote_updates (status = pending)\nINSERT outbox\nCOMMIT
+note right of db
+  В той же транзакции проверяются
+  Idempotency-Key и правило «одно незавершённое
+  обновление на пару», см. sequence-idempotency
+end note
+api --> client : 202 Accepted\n{"id": "7f3c…", "status": "pending"}\nLocation: /api/v1/quotes/updates/7f3c…
+deactivate api
+note over client, api
+  Обработчик не обращается
+  ни к Kafka, ни к внешнему API
+end note
+
+== 2. Фоновая обработка в воркере ==
+
+loop каждые 200 мс
+    relay -> db : BEGIN\nSELECT … FROM outbox ORDER BY id\nLIMIT 100 FOR UPDATE SKIP LOCKED
+    relay -> kafka : produce в quote.update.requested\nключ "EUR/MXN", acks = all
+    kafka --> relay : ack
+    relay -> db : DELETE отправленные строки\nCOMMIT
+end
+
+kafka -> consumer : {"update_id": "7f3c…"}
+activate consumer
+consumer -> db : UPDATE quote_updates\nSET status = processing, attempts = attempts + 1\nWHERE id = … AND status IN (pending, processing)
+consumer -> rates : GET /v2/rate/EUR/MXN
+rates --> consumer : 200: курс и дата курса
+consumer -> db : BEGIN\nUPDATE quote_updates SET status = done,\nprice, rate_date, completed_at\nINSERT quotes … ON CONFLICT DO UPDATE\nWHERE quotes.updated_at < EXCLUDED.updated_at\nCOMMIT
+consumer -> kafka : commit offset
+deactivate consumer
+
+== 3. Результат ==
+
+client -> api : GET /api/v1/quotes/updates/7f3c…
+api -> db : SELECT … FROM quote_updates WHERE id = …
+alt обновление ещё не завершено
+    api --> client : 200 {"status": "pending"}\nRetry-After: 1
+else завершено
+    api --> client : 200 {"status": "done", "price": "21.4512",\n"rate_date": "2026-11-05", "updated_at": "…"}
+end
+
+client -> api : GET /api/v1/quotes/latest?pair=EUR/MXN
+api -> db : SELECT … FROM quotes WHERE пара = EUR/MXN
+api --> client : 200 {"pair": "EUR/MXN", "price": "21.4512",\n"updated_at": "…"}
+@enduml

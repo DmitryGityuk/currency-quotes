@@ -1,0 +1,12 @@
+# Intentional exceptions to the Redocly recommended rules:
+# - info-license: a test assignment declares no license;
+# - operation-4xx-response: health probes and /metrics never answer 4xx.
+# This file instructs Redocly's linter to ignore the rules contained for specific parts of your API.
+# See https://redocly.com/docs/cli/ for more information.
+api/openapi.yaml:
+  info-license:
+    - '#/info'
+  operation-4xx-response:
+    - '#/paths/~1livez/get/responses'
+    - '#/paths/~1readyz/get/responses'
+    - '#/paths/~1metrics/get/responses'

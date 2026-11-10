@@ -1,0 +1,52 @@
+@startuml sequence-idempotency
+' What POST /api/v1/quotes/updates does inside its single transaction:
+' Idempotency-Key replay and joining an update that is already in flight.
+title POST /api/v1/quotes/updates: идемпотентность в одной транзакции
+autonumber
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 320
+
+actor "Клиент" as client
+participant "API" as api
+database "PostgreSQL" as db
+
+client -> api : POST /api/v1/quotes/updates\nIdempotency-Key: k1\n{"pair": "EUR/MXN"}
+api -> api : проверить пару,\nhash = SHA-256 нормализованного тела
+api -> db : BEGIN
+api -> db : SELECT request_hash, update_id FROM idempotency_keys\nWHERE idempotency_key = 'k1' (если ключ передан)
+
+alt ключ k1 уже сохранён
+    alt тело то же: hash совпадает
+        api -> db : ROLLBACK
+        api --> client : 202, тот же id\nIdempotent-Replayed: true
+    else тело другое
+        api -> db : ROLLBACK
+        api --> client : 422 idempotency_key_reused
+    end
+else ключа нет или он не передан
+    api -> db : INSERT INTO quote_updates …\nON CONFLICT (base_currency, quote_currency)\nWHERE status IN ('pending', 'processing')\nDO NOTHING RETURNING id
+    alt строка вставлена: новое обновление
+        api -> db : INSERT INTO outbox …
+    else по паре уже идёт обновление
+        api -> db : SELECT id FROM quote_updates\nWHERE пара = EUR/MXN AND status IN ('pending', 'processing')
+        note right of db
+          Outbox не пишем: сообщение
+          ушло с первой заявкой.
+          Если то обновление успело
+          завершиться, повторяем INSERT
+        end note
+    end
+    opt передан Idempotency-Key
+        api -> db : INSERT INTO idempotency_keys (k1, hash, id)\nON CONFLICT DO NOTHING
+        note right of db
+          Параллельный запрос с тем же
+          ключом ждёт на уникальном индексе.
+          Если первым успел другой запрос,
+          откатываемся и отвечаем как на повтор
+        end note
+    end
+    api -> db : COMMIT
+    api --> client : 202 {"id": "…", "status": "pending"}
+end
+@enduml

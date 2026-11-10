@@ -1,0 +1,61 @@
+@startuml sequence-failures
+' Failure scenarios and why an accepted request is never lost.
+title Сбои: что происходит и почему заявка не теряется
+skinparam responseMessageBelowArrow true
+skinparam sequenceMessageAlign left
+skinparam maxMessageSize 280
+
+participant "API" as api
+database "PostgreSQL" as db
+box "Worker" #EEF3F8
+    participant "Outbox relay" as relay
+    participant "Consumer" as consumer
+end box
+queue "Kafka" as kafka
+queue "DLQ\nquote.update.requested.dlq" as dlq
+participant "Frankfurter" as rates
+
+group Kafka недоступна
+    api -> db : заявка и outbox, COMMIT
+    note left of api : POST по-прежнему\nотвечает 202
+    relay -> db : SELECT … FOR UPDATE SKIP LOCKED
+    relay ->x kafka : produce: брокер недоступен
+    relay -> db : ROLLBACK, строки остаются в outbox
+    ...повтор с паузой, пока Kafka не вернётся...
+    relay -> kafka : produce
+    kafka --> relay : ack
+    relay -> db : DELETE, COMMIT
+end
+
+group Воркер упал во время обработки
+    kafka -> consumer : {"update_id": "7f3c…"}
+    consumer -> db : status = processing
+    note over consumer : процесс упал,\noffset не закоммичен
+    ...перезапуск и ребаланс группы...
+    kafka -> consumer : то же сообщение ещё раз
+    consumer -> db : UPDATE … WHERE status IN (pending, processing)
+    note right of db : done и failed не перезаписываются,\nповторная доставка безопасна
+end
+
+group Frankfurter не отвечает
+    loop до 3 попыток, пауза растёт экспоненциально, со случайным разбросом
+        consumer -> rates : GET /v2/rate/EUR/MXN
+        rates --> consumer : 503 или таймаут
+    end
+    consumer -> db : status = failed, last_error = причина
+    consumer -> kafka : commit offset
+    note right of consumer : ответ 4xx, кроме 429, не повторяем:\nсразу failed
+end
+
+group PostgreSQL недоступна у воркера
+    kafka -> consumer : сообщение
+    consumer ->x db : UPDATE: нет соединения
+    note over consumer : offset не коммитим,\nповторяем с паузой
+end
+
+group Сообщение нельзя обработать
+    kafka -> consumer : битый JSON или неизвестный update_id
+    consumer -> dlq : сообщение как есть,\nпричина в заголовке
+    consumer -> kafka : commit offset
+end
+@enduml

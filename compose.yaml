@@ -1,0 +1,207 @@
+# Local stack: `docker compose up --build`.
+# Works the same on Windows (Docker Desktop), macOS and Linux.
+# Host ports can be changed in .env (see .env.example).
+name: currency-quotes
+
+x-database-url: &database-url postgres://quotes:quotes@postgres:5432/quotes?sslmode=disable
+
+x-app-env: &app-env
+  HTTP_ADDR: ":8080"
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  DATABASE_URL: *database-url
+
+x-app: &app
+  build: .
+  image: currency-quotes:local
+  # Built locally, never pulled: `docker compose pull` skips it, and
+  # `docker compose up` always builds the current code.
+  pull_policy: build
+  restart: unless-stopped
+  environment: *app-env
+  healthcheck:
+    # The image is built from scratch and has no curl, so the binary probes itself.
+    test: ["CMD", "/usr/local/bin/quotes", "healthcheck"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 10s
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: quotes
+      POSTGRES_USER: quotes
+      POSTGRES_PASSWORD: quotes
+    ports:
+      # Not 5432 on the host: a local PostgreSQL often already uses it.
+      - "${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quotes -d quotes"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Applies migrations/ and exits; the API and the worker start after it.
+  migrate:
+    build:
+      context: .
+      target: migrate
+    image: currency-quotes-migrate:local
+    pull_policy: build
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:4.2.0
+    environment:
+      # Single node that is both broker and controller (KRaft, no ZooKeeper).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # PLAINTEXT is for other containers, EXTERNAL for `go run` on the host.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT:-59094}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # One broker, so every internal topic has one replica.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by kafka-init.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Keeps the stack small enough for Docker Desktop's default memory.
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    ports:
+      - "${KAFKA_PORT:-59094}:9094"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-init:
+    image: apache/kafka:4.2.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    # Inline script: nothing is mounted from the host, so it cannot break
+    # because of file permissions or CRLF line endings on Windows.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        create() {
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+            --create --if-not-exists --topic "$$1" \
+            --partitions "$$2" --replication-factor 1
+        }
+        create quote.update.requested 6
+        create quote.update.requested.dlq 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+  # The API needs only PostgreSQL: requests are written to the outbox, so
+  # POST keeps working while Kafka is down.
+  api:
+    <<: *app
+    command: ["api"]
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # The worker relays the outbox to Kafka and processes the updates.
+  worker:
+    <<: *app
+    command: ["worker"]
+    environment:
+      <<: *app-env
+      KAFKA_BROKERS: kafka:9092
+      # frankfurter is the real API; fake works without internet.
+      RATES_PROVIDER: ${RATES_PROVIDER:-frankfurter}
+      FAKE_RATES_DELAY: ${FAKE_RATES_DELAY:-500ms}
+      FAKE_RATES_FAILURE_RATE: ${FAKE_RATES_FAILURE_RATE:-0}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+
+  # Runs the assignment scenario against the API and prints what happens:
+  # `docker compose run --rm demo`. Exits non-zero if anything is off.
+  demo:
+    build: .
+    image: currency-quotes:local
+    pull_policy: build
+    profiles: [demo]
+    command: ["demo"]
+    environment:
+      DEMO_API_URL: http://api:8080
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    restart: "no"
+
+  # ---- Observability: `docker compose --profile observability up` ----------
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    profiles: [observability]
+    environment:
+      # A local demo: open without logging in.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/currency-quotes.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    profiles: [observability]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "${KAFKA_UI_PORT:-8090}:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
