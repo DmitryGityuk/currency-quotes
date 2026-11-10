@@ -22,6 +22,12 @@ note right of pending
   это гарантирует частичный уникальный индекс
 end note
 
+note left of processing
+  Если сообщение потерялось в Kafka,
+  через 2 минуты воркер отправляет
+  обновление заново
+end note
+
 note right of done
   done и failed — конечные статусы:
   повторные сообщения их не меняют

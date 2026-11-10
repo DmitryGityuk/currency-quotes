@@ -69,3 +69,21 @@ tests:
               outcome: dlq
             exp_annotations:
               summary: "Messages were sent to quote.update.requested.dlq; inspect them in Kafka UI"
+
+  - name: requeued updates
+    interval: 1m
+    input_series:
+      - series: quotes_updates_requeued_total{job="worker"}
+        values: "0 0 0 2 2"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: UpdatesRequeued
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: UpdatesRequeued
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: worker
+            exp_annotations:
+              summary: "Updates lost their Kafka message and were sent again; check Kafka storage and retention"

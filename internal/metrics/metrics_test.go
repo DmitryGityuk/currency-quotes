@@ -41,6 +41,7 @@ func TestObservations(t *testing.T) {
 	m.MessageHandled("processed")
 	m.MessageHandled("dlq")
 	m.SetOutbox(4, 90*time.Second)
+	m.UpdatesRequeued(2)
 
 	checks := []struct {
 		name string
@@ -58,6 +59,7 @@ func TestObservations(t *testing.T) {
 		{"outbox backlog", testutil.ToFloat64(m.outboxBacklog), 4},
 		{"outbox oldest", testutil.ToFloat64(m.outboxOldest), 90},
 		{"kafka dlq", testutil.ToFloat64(m.kafkaMessages.WithLabelValues("dlq")), 1},
+		{"requeued", testutil.ToFloat64(m.updatesRequeued), 2},
 	}
 	for _, c := range checks {
 		if c.got != c.want {

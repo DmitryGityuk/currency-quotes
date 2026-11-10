@@ -10,6 +10,7 @@ database "PostgreSQL" as db
 box "Worker" #EEF3F8
     participant "Outbox relay" as relay
     participant "Consumer" as consumer
+    participant "Requeue" as requeue
 end box
 queue "Kafka" as kafka
 queue "DLQ\nquote.update.requested.dlq" as dlq
@@ -51,6 +52,14 @@ group PostgreSQL недоступна у воркера
     kafka -> consumer : сообщение
     consumer ->x db : UPDATE: нет соединения
     note over consumer : offset не коммитим,\nповторяем с паузой
+end
+
+group Сообщение потерялось в Kafka
+    note over kafka : брокер потерял данные\nили истёк срок хранения,\nа строки в outbox уже нет
+    requeue -> db : раз в минуту: обновления в pending или processing\nстарше 2 минут и без сообщения в outbox
+    requeue -> db : новое сообщение в outbox, COMMIT
+    relay -> kafka : produce
+    note right of requeue : иначе обновление зависло бы навсегда,\nа новые POST по паре присоединялись бы к нему.\nКопия безвредна: завершённые обновления\nворкер пропускает
 end
 
 group Сообщение нельзя обработать
