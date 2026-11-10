@@ -1,0 +1,15 @@
+# Public entry point of the demo (compose.server.yaml). Caddy obtains and
+# renews the TLS certificate for $DOMAIN by itself and redirects HTTP to HTTPS.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# The bare address opens the API documentation.
+	redir / /docs
+
+	# Metrics are for a Prometheus inside the network, not for the internet.
+	respond /metrics 404
+
+	reverse_proxy api:8080
+
+	log
+}
