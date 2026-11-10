@@ -222,8 +222,16 @@ jobs:
           grafana() { curl -sk --resolve grafana.localhost:443:127.0.0.1 "$@"; }
           for i in $(seq 60); do grafana --fail --output /dev/null https://grafana.localhost/api/health && break; sleep 1; done
           grafana --fail https://grafana.localhost/api/search | jq -e 'length > 0'
-          test "$(grafana -o /dev/null -w '%{http_code}' -u admin:admin https://grafana.localhost/api/admin/settings)" = 401
-          test "$(grafana -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"title":"x"}' https://grafana.localhost/api/folders)" = 403
+          code() { grafana -o /dev/null -w '%{http_code}' "$@"; }
+          # The admin API opens with the password from .env and not with the default one.
+          real=$(code -u "admin:$GRAFANA_ADMIN_PASSWORD" https://grafana.localhost/api/admin/settings)
+          default=$(code -u admin:admin https://grafana.localhost/api/admin/settings)
+          # A visitor cannot change anything.
+          write=$(code -X POST -H 'Content-Type: application/json' -d '{"title":"x"}' https://grafana.localhost/api/folders)
+          echo "admin with the real password: $real, with admin/admin: $default, anonymous write: $write"
+          test "$real" = 200
+          case "$default" in 401|403) ;; *) exit 1 ;; esac
+          case "$write" in 401|403) ;; *) exit 1 ;; esac
       - name: Only Caddy is published
         run: |
           for port in 8080 55432 59094 9090 3000; do
