@@ -232,6 +232,10 @@ jobs:
           test "$real" = 200
           case "$default" in 401|403) ;; *) exit 1 ;; esac
           case "$write" in 401|403) ;; *) exit 1 ;; esac
+      - name: The traffic generator sends requests
+        run: |
+          for i in $(seq 20); do docker compose logs traffic | grep -Eq 'EUR/MXN [0-9a-f-]{36}' && exit 0; sleep 1; done
+          docker compose logs traffic; exit 1
       - name: Only Caddy is published
         run: |
           for port in 8080 55432 59094 9090 3000; do
