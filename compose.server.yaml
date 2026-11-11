@@ -12,7 +12,9 @@
 #   - the database password comes from .env;
 #   - every container has a memory limit, so the demo cannot starve other
 #     services on the same server; Kafka gets a smaller heap;
-#   - container logs are rotated.
+#   - container logs are rotated;
+#   - the traffic service sends a request every 30 seconds, so the dashboard
+#     is not empty.
 #   - Prometheus and Grafana always run; Grafana is public at grafana.DOMAIN,
 #     read-only, and Prometheus stays inside the network. Kafka UI stays in
 #     the observability profile: start it for a while and reach it through
@@ -65,6 +67,36 @@ services:
     logging: *logging
 
   demo:
+    logging: *logging
+
+  # Synthetic traffic, so the public Grafana dashboard has something to show:
+  # every TRAFFIC_INTERVAL it requests an update of the next pair, then reads
+  # the result and the latest quote. Stop it with `docker compose stop traffic`.
+  traffic:
+    image: alpine:3.22
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:8080
+      INTERVAL: ${TRAFFIC_INTERVAL:-30}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          for pair in EUR/MXN USD/MXN EUR/USD USD/EUR MXN/USD MXN/EUR; do
+            id=$$(wget -q -O- --header 'Content-Type: application/json' \
+              --post-data "{\"pair\":\"$$pair\"}" "$$API_URL/api/v1/quotes/updates" \
+              | sed 's/.*"id":"\([^"]*\)".*/\1/')
+            sleep 3
+            wget -q -O /dev/null "$$API_URL/api/v1/quotes/updates/$$id"
+            wget -q -O /dev/null "$$API_URL/api/v1/quotes/latest?pair=$$pair"
+            echo "$$pair $$id"
+            sleep "$$INTERVAL"
+          done
+        done
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 32m
     logging: *logging
 
   prometheus:
